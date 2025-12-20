@@ -6,14 +6,16 @@ This document summarizes the steps taken to configure an Ubuntu Server system to
 
 ## 1. Initial Problem
 
-- SSH key authentication was failing.
-- The server silently fell back to password authentication.
-- Client debug logs (`ssh -v`) showed keys being offered but not accepted.
-
-**Root cause:**  
-Incorrect ownership and/or permissions on the server-side SSH files caused `sshd` to ignore `authorized_keys`.
-
-OpenSSH enforces strict permission checks by default (`StrictModes yes`).
+Update sshd_config
+```bash
+sudo nano /etc/ssh/sshd_config
+```
+Change the following lines
+```text
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+```
 
 ---
 
