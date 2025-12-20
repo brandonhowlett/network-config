@@ -108,13 +108,14 @@ sudo nano /etc/systemd/network/10-enp1s0f0-static.network
 
 ```ini
 [Match]
-Name=enp1s0f0
+#Name=enp1s0f0
+Name=eth0
 
 [Network]
 Address=10.10.30.10/16
 Gateway=10.10.0.1
 DNS=10.10.0.1
-# RequiredForOnline=no
+RequiredForOnline=no
 ```
 
 Restart networkd:
@@ -126,7 +127,7 @@ sudo systemctl restart systemd-networkd
 Verify:
 
 ```bash
-networkctl status enp1s0f0 | grep Required
+networkctl status eth0 | grep Required
 ```
 
 Expected output:
