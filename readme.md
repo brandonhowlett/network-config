@@ -85,7 +85,7 @@ network:
       optional: true
       activation-mode: manual
       access-points:
-        "Sedentary Sheep":
+        "Wifi SSID":
           password: ""
 ```
 
@@ -108,7 +108,21 @@ sudo nano /etc/systemd/network/10-enp1s0f0-static.network
 
 ```ini
 [Match]
-#Name=enp1s0f0
+Name=enp1s0f0
+
+[Network]
+Address=10.10.30.10/16
+Gateway=10.10.0.1
+DNS=10.10.0.1
+RequiredForOnline=no
+```
+
+```bash
+sudo nano /etc/systemd/network/10-eth0-static.network
+```
+
+```ini
+[Match]
 Name=eth0
 
 [Network]
