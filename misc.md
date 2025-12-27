@@ -137,3 +137,38 @@ Configure system timezone
 ```bash
 sudo timedatectl set-timezone America/Denver
 ```
+Install age
+```bash
+sudo apt install age
+age --version
+```
+Install SOPS
+
+https://github.com/getsops/sops/releases
+
+Generate a SOPS key
+```bash
+mkdir -p ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt
+chmod 600 ~/.config/sops/age/keys.txt
+```
+
+In k3s-cluster root
+```bash
+nano .sops.yaml
+```
+```bash
+creation_rules:
+  - path_regex: infrastructure/.*/secrets\.enc\.yaml$
+    encrypted_regex: '^(data|stringData)$'
+    age: age1ns7vp2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+Encrypt with:
+```bash
+cp infrastructure/<dir>/secrets.yaml infrastructure/<dir>/secrets.enc.yaml
+sops --encrypt --in-place infrastructure/<dir>/secrets.enc.yaml
+```
+Verify with:
+```bash
+sops -d infrastructure/traefik/secrets.enc.yaml
+```
