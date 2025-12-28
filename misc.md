@@ -143,8 +143,22 @@ sudo apt install age
 age --version
 ```
 Install SOPS
-
 https://github.com/getsops/sops/releases
+```bash
+# Download the binary
+curl -LO https://github.com/getsops/sops/releases/download/v3.11.0/sops-v3.11.0.linux.amd64
+mv sops-v3.11.0.linux.amd64 /usr/local/bin/sops
+chmod +x /usr/local/bin/sops
+```
+
+Install SOPS cubectl plugin
+https://github.com/craftypath/kubectl-sops/releases/
+```bash
+curl -LO https://github.com/craftypath/kubectl-sops/releases/download/v0.4.0/kubectl-sops_0.4.0_linux_amd64.tar.gz
+tar -xzf kubectl-sops_0.4.0_linux_amd64.tar.gz
+chmod +x kubectl-sops
+sudo mv kubectl-sops /usr/local/bin/
+```
 
 Generate a SOPS key
 ```bash
