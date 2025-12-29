@@ -13,7 +13,6 @@ sed '/^#/d' ~/.config/sops/age/keys.txt > ~/.config/sops/age/key.txt
 Install SOPS
 https://github.com/getsops/sops/releases
 ```bash
-# Download the binary
 curl -LO https://github.com/getsops/sops/releases/download/v3.11.0/sops-v3.11.0.linux.amd64
 mv sops-v3.11.0.linux.amd64 /usr/local/bin/sops
 chmod +x /usr/local/bin/sops
