@@ -30,7 +30,9 @@ chmod 600 ~/.config/sops/age/key.txt
 ## 3. Install SOPS
 
 ``` bash
-sudo apt install -y sops
+SOPS_LATEST=$(curl -s https://api.github.com/repos/getsops/sops/releases/latest | jq -r '.assets[] | select(.name | test("linux.amd64$")) | .browser_download_url') && \
+sudo curl -L "$SOPS_LATEST" -o /usr/local/bin/sops && \
+sudo chmod +x /usr/local/bin/sops
 sops --version
 ```
 
@@ -47,11 +49,14 @@ helm repo update
 kubectl create namespace sops-operator
 kubectl create secret generic age-key \
   -n sops-operator \
-  --from-file=key.txt=~/.config/sops/age/key.txt
+  --from-file=key.txt="$HOME/.config/sops/age/key.txt"
 ```
 
 ## 6. Operator values.yaml
 
+``` bash
+nano ~/k3s-cluster/infrastructure/sops-operator/values.yaml
+```
 ``` yaml
 secretsAsFiles:
   - name: sops-age-key
@@ -68,12 +73,14 @@ extraEnv:
 ``` bash
 helm install sops-operator sops-operator/sops-secrets-operator \
   --namespace sops-operator \
-  --create-namespace \
-  --values values.yaml
+  --values ~/k3s-cluster/infrastructure/sops-operator/values.yaml
 ```
 
 ## 8. .sops.yaml
 
+``` bash
+nano ~/k3s-cluster/.sops.yaml
+```
 ``` yaml
 creation_rules:
   - path_regex: infrastructure/.*/secrets\.enc\.yaml$
