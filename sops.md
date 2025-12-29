@@ -1,8 +1,8 @@
-# SOPS + Age + Kubernetes (Bare Metal)
+# SOPS + Age + Kubernetes
 
 This document describes installing and configuring **SOPS with Age
 encryption** and the **isindir SOPS Secrets Operator** for Kubernetes
-(k3s), starting from bare metal.
+(k3s).
 
 ## 1. Install Age
 
