@@ -100,7 +100,7 @@ metadata:
 spec:
   suspend: false
   secretTemplates:
-    - name: some-token
+    - name: test-secret
       stringData:
         password: test
 ```
@@ -108,19 +108,19 @@ spec:
 Encrypt:
 
 ``` bash
-sops -e test-secret.yaml > test-secret.enc.yaml
+sops -e secret.yaml > secret.enc.yaml
 ```
 
 Apply:
 
 ``` bash
-kubectl apply -f test-secret.enc.yaml
+kubectl apply -f secret.enc.yaml
 ```
 
 ## 10. Verify
 
 ``` bash
-kubectl get secret some-token -n default -o jsonpath='{.data.password}' | base64 -d
+kubectl get secret test-secret -n default -o jsonpath='{.data.password}' | base64 -d
 ```
 
 # Executable install script
