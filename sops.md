@@ -27,12 +27,6 @@ sed '/^#/d' ~/.config/sops/age/keys.txt > ~/.config/sops/age/key.txt
 chmod 600 ~/.config/sops/age/key.txt
 ```
 
-Extract public key:
-
-``` bash
-grep -o 'age1[0-9a-z]*' ~/.config/sops/age/keys.txt
-```
-
 ## 3. Install SOPS
 
 ``` bash
