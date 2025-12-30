@@ -40,6 +40,14 @@ Ensure your Traefik Helm chart directory has the following structure:
 
 ## 2. Install Traefik CRDs
 
+
+Install the traefik repo:
+
+```bash
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+```
+
 Traefik’s CRDs must be installed first:
 
 ```bash
@@ -86,18 +94,14 @@ You should see both `traefik-crds` and `traefik` listed.
 Apply dynamic configuration, secrets, and certificates:
 
 ```bash
-kubectl apply -f templates/dynamic-configmap.yaml -n traefik
-kubectl apply -f templates/plugins-pvc.yaml -n traefik
+kubectl apply -f templates
 kubectl apply -f certificates.yaml -n traefik
-kubectl apply -f secret.yaml -n traefik
+kubectl apply -f secret.enc.yaml -n traefik
 ```
-
-- If using `sops`, decrypt and apply:
-
 ```bash
-sops -d secret.enc.yaml | kubectl apply -f - -n traefik
+# kubectl apply -f templates/dynamic-configmap.yaml -n traefik
+# kubectl apply -f templates/plugins-pvc.yaml -n traefik
 ```
-
 ---
 
 ## 5. Verify Traefik Deployment
