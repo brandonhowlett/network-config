@@ -7,7 +7,7 @@ This document summarizes the steps taken to configure an Ubuntu Server system to
 ## 1. Initial Problem
 
 Update sshd_config
-```bash
+``` bash
 sudo nano /etc/ssh/sshd_config
 ```
 Change the following lines
@@ -38,16 +38,16 @@ Confirmed:
 
 On the Ubuntu server:
 
-```bash
-chown -R brandon:brandon /home/brandon/.ssh
-chmod 700 /home/brandon
-chmod 700 /home/brandon/.ssh
-chmod 600 /home/brandon/.ssh/authorized_keys
+``` bash
+chown -R $USER:$USER ~/.ssh
+chmod 700 ~/
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
 ```
 
 Verification:
 
-```bash
+``` bash
 ls -ld ~ ~/.ssh ~/.ssh/authorized_keys
 ```
 
@@ -60,7 +60,7 @@ ls -ld ~ ~/.ssh ~/.ssh/authorized_keys
 To standardize on ED25519 (preferred):
 
 1. Add ED25519 public key to the server:
-   ```bash
+   ``` bash
    nano ~/.ssh/authorized_keys
    ```
 
@@ -68,18 +68,18 @@ To standardize on ED25519 (preferred):
 
 Created a dedicated SSH configuration override:
 
-```bash
+``` bash
 sudo nano /etc/ssh/sshd_config.d/10-local-network.conf
 ```
 Disable existing cloud configuration:
 
-```bash
+``` bash
 sudo rm /etc/ssh/sshd_config.d/50-cloud-init.conf
 ```
 
 Contents:
 
-```conf
+``` conf
 Match Address 10.10.0.0/16
     PasswordAuthentication no
     PubkeyAuthentication yes
@@ -90,7 +90,7 @@ Match Address 10.50.0.0/16
 
 Reload SSH:
 
-```bash
+``` bash
 sudo systemctl reload ssh
 ```
 
