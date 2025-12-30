@@ -127,6 +127,12 @@ After Calico networking is active, restart pods so they receive Calico-managed I
 kubectl delete pods --all --all-namespaces
 ```
 
+Install Calico CLI tools
+```bash
+sudo curl -L -o calicoctl \
+  https://github.com/projectcalico/calico/releases/download/v3.27.0/calicoctl-linux-amd64
+```
+
 7. Verification
 
 Confirm node and pod networking:
