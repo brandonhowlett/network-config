@@ -1,0 +1,2020 @@
+➜  k3s-cluster git:(main) ✗ ./print.sh
+=== Directory Tree ===
+/home/brandon/k3s-cluster
+├── bootstrap
+│   ├── 00-host.sh
+│   ├── 01-cluster.sh
+│   ├── 02-infra.sh
+│   ├── 03-smoke.sh
+│   ├── 04-platform.sh
+│   ├── k8s
+│   │   └── calico.yaml
+│   ├── lib
+│   │   └── apply-layer.sh
+│   ├── old-scripts
+│   │   ├── apply-all.sh
+│   │   ├── sops-install.sh
+│   │   ├── sops-uninstall.sh
+│   │   ├── sync-local-versions.sh
+│   │   └── traefik-reinstall.sh
+│   └── wrapper.sh
+├── docs
+│   └── README.md
+├── helm
+│   ├── apps
+│   │   ├── debug
+│   │   │   └── busybox.yaml
+│   │   ├── home-assistant
+│   │   │   ├── Chart.yaml
+│   │   │   ├── defaultValues.yaml
+│   │   │   ├── k8s
+│   │   │   │   ├── 00-namespace.yaml
+│   │   │   │   ├── 30-certificates.yaml
+│   │   │   │   └── 40-ingress.yaml
+│   │   │   └── values.yaml
+│   │   └── whoami
+│   │       └── k8s
+│   │           ├── 00-namespace.yaml
+│   │           ├── 20-certificates.yaml
+│   │           ├── 40-ingress.yaml
+│   │           ├── deployment.yaml
+│   │           └── service.yaml
+│   ├── infra
+│   │   ├── operators
+│   │   │   ├── cert-manager
+│   │   │   │   ├── k8s
+│   │   │   │   └── values.yaml
+│   │   │   ├── cloudflared
+│   │   │   │   ├── k8s
+│   │   │   │   │   ├── 10-secret.sops.yaml
+│   │   │   │   │   └── secret.yaml
+│   │   │   │   └── values.yaml
+│   │   │   ├── sops-operator
+│   │   │   │   ├── k8s
+│   │   │   │   │   └── example-secret.yaml
+│   │   │   │   └── values.yaml
+│   │   │   └── traefik
+│   │   │       ├── Chart.yaml
+│   │   │       ├── k8s
+│   │   │       │   ├── 10-secret.sops.yaml
+│   │   │       │   ├── 20-certificates.yaml
+│   │   │       │   ├── 40-ingress.yaml
+│   │   │       │   └── secret.yaml
+│   │   │       ├── templates
+│   │   │       │   ├── dynamic-configmap.yaml
+│   │   │       │   └── plugins-pvc.yaml
+│   │   │       └── values.yaml
+│   │   └── static
+│   │       ├── issuers
+│   │       │   └── k8s
+│   │       │       ├── 10-secret.sops.yaml
+│   │       │       ├── 50-clusterIssuers.yaml
+│   │       │       └── secret.yaml
+│   │       └── namespaces
+│   │           ├── 00-cert-manager.yaml
+│   │           ├── 00-traefik.yaml
+│   │           ├── 30-sops-operator.yaml
+│   │           └── 50-cloudflared.yaml
+│   └── platform
+├── manifests
+│   └── certs
+│       ├── local-ca.crt
+│       ├── local-cert.pem
+│       ├── local-key.pem
+│       ├── smarthome-root-ca.crt
+│       ├── smarthome-root-ca.key
+│       ├── smarthome-root-ca.srl
+│       ├── wildcard.cnf
+│       └── wildcard.csr
+├── pki
+│   └── smarthome-root-ca.crt
+└── print.sh
+
+32 directories, 57 files
+=== File Contents ===
+>>> .gitignore <<<
+# secret files
+secret.yaml
+secrets.yaml
+*-secret.yaml
+*-secrets.yaml
+
+# Auxiliary sample files
+defaultValues.yaml
+
+*.json
+
+manifests/certs
+
+print.sh
+>>> .sops.yaml <<<
+creation_rules:
+  - path_regex: .*secrets?\.yaml$
+    encrypted_regex: '^(data|stringData)$'
+    age:
+      - age1pqkt694pps8jf408tmn8gg6692mpvh23nw9jvqsfxayy9fjth9msps9fcu
+
+>>> bootstrap/00-host.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Phase 00: Host Tooling Bootstrap ==="
+
+# -------------------------------------------------------------------
+# Helper: check if package is installed
+# -------------------------------------------------------------------
+is_installed() {
+    dpkg -s "$1" >/dev/null 2>&1
+}
+
+# -------------------------------------------------------------------
+# Warn user before using sudo
+# -------------------------------------------------------------------
+echo ">>> This script may require sudo for package installation"
+
+# -------------------------------------------------------------------
+# Host tooling installation
+# -------------------------------------------------------------------
+PACKAGES=(age jq curl)
+TO_INSTALL=()
+for pkg in "${PACKAGES[@]}"; do
+    if ! is_installed "$pkg"; then
+        TO_INSTALL+=("$pkg")
+    fi
+done
+
+if [[ ${#TO_INSTALL[@]} -gt 0 ]]; then
+    echo ">>> Installing missing packages: ${TO_INSTALL[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${TO_INSTALL[@]}"
+else
+    echo ">>> All host packages already installed"
+fi
+
+# -------------------------------------------------------------------
+# Install SOPS if missing
+# -------------------------------------------------------------------
+if ! command -v sops >/dev/null 2>&1; then
+    echo ">>> Installing sops"
+    SOPS_VERSION="3.9.4"
+    SOPS_URL="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64"
+    sudo curl -L "$SOPS_URL" -o /usr/local/bin/sops
+    sudo chmod +x /usr/local/bin/sops
+fi
+
+sops --version
+age --version
+
+# -------------------------------------------------------------------
+# Age key management (persistent)
+# -------------------------------------------------------------------
+echo ">>> Ensuring age keypair exists"
+AGE_DIR="$HOME/.config/sops/age"
+mkdir -p "$AGE_DIR"
+
+KEY_FILE="$AGE_DIR/keys.txt"
+PRIVATE_KEY="$AGE_DIR/key.txt"
+PUBLIC_KEY="$AGE_DIR/pub.txt"
+
+if [[ ! -f "$KEY_FILE" ]]; then
+    echo ">>> Generating new age keypair"
+    age-keygen -o "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+    sed '/^#/d' "$KEY_FILE" >"$PRIVATE_KEY"
+    grep '^# public key:' "$KEY_FILE" | awk '{print $4}' >"$PUBLIC_KEY"
+    chmod 600 "$PRIVATE_KEY"
+    chmod 644 "$PUBLIC_KEY"
+else
+    echo ">>> Reusing existing age keypair"
+fi
+
+# -------------------------------------------------------------------
+# Repository-level .sops.yaml
+# -------------------------------------------------------------------
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOPS_YAML="$REPO_ROOT/.sops.yaml"
+
+if [[ ! -f "$SOPS_YAML" ]]; then
+    echo ">>> Creating repo-level .sops.yaml"
+    cat >"$SOPS_YAML" <<EOF
+creation_rules:
+  - path_regex: .*\\.sops\\.yaml$
+    encrypted_regex: '^(data|stringData)$'
+    age:
+      - $(cat "$PUBLIC_KEY")
+EOF
+fi
+
+echo "=== Phase 00 complete: tooling + repo config ready ==="
+
+>>> bootstrap/01-cluster.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Phase 01: Cluster Bootstrap ==="
+
+KUBECONFIG_FILE="$HOME/.kube/config"
+CALICO_VERSION="v3.31.3"
+
+# -------------------------------------------------------------------
+# Helper: retry command n times with delay
+# -------------------------------------------------------------------
+retry() {
+  local n=5
+  local delay=3
+  local i=1
+  until "$@"; do
+    if [[ $i -ge $n ]]; then
+      echo "Command failed after $n attempts: $*"
+      return 1
+    fi
+    echo "Retry $i/$n: $*"
+    i=$((i+1))
+    sleep $delay
+  done
+}
+
+# -------------------------------------------------------------------
+# Install k3s
+# -------------------------------------------------------------------
+install_k3s() {
+  if systemctl is-active --quiet k3s; then
+    echo "k3s already running — skipping installation"
+    return
+  fi
+
+  echo ">>> Installing k3s (no CNI, no Traefik)"
+  retry curl -sfL https://get.k3s.io | \
+    K3S_KUBECONFIG_MODE="644" \
+    INSTALL_K3S_EXEC="--flannel-backend=none --cluster-cidr=10.10.250.0/24 --disable-network-policy --disable=traefik" \
+    sh -
+}
+
+# -------------------------------------------------------------------
+# Setup kubeconfig
+# -------------------------------------------------------------------
+setup_kubeconfig() {
+  mkdir -p "$(dirname "$KUBECONFIG_FILE")"
+  if [[ ! -f "$KUBECONFIG_FILE" ]]; then
+    sudo cp /etc/rancher/k3s/k3s.yaml "$KUBECONFIG_FILE"
+    sudo chown "$USER:$USER" "$KUBECONFIG_FILE"
+    chmod 600 "$KUBECONFIG_FILE"
+  fi
+  export KUBECONFIG="$KUBECONFIG_FILE"
+
+  echo ">>> Waiting for all nodes to be Ready"
+  kubectl wait --for=condition=Ready node --all --timeout=180s || {
+    echo "Error: Some nodes did not reach Ready state"
+    kubectl get nodes
+    exit 1
+  }
+}
+
+# -------------------------------------------------------------------
+# Install Calico operator + CRDs
+# -------------------------------------------------------------------
+install_calico_operator() {
+  echo ">>> Installing Calico operator and CRDs"
+
+  # Pre-check if CRDs exist
+  if kubectl get crds | grep -q "tigera"; then
+    echo "Calico CRDs already installed — skipping"
+  else
+    retry kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/operator-crds.yaml"
+  fi
+
+  # Pre-check if operator deployment exists
+  if kubectl get deployment tigera-operator -n tigera-operator >/dev/null 2>&1; then
+    echo "tigera-operator deployment already exists — skipping"
+  else
+    retry kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/tigera-operator.yaml"
+  fi
+
+  echo ">>> Waiting for tigera-operator deployment to be available"
+  kubectl wait -n tigera-operator \
+    --for=condition=Available deployment/tigera-operator \
+    --timeout=180s || {
+      echo "Error: tigera-operator did not become Available"
+      kubectl get pods -n tigera-operator -o wide
+      exit 1
+    }
+}
+
+# -------------------------------------------------------------------
+# Apply Calico installation manifests
+# -------------------------------------------------------------------
+apply_calico() {
+  echo ">>> Applying Calico installation manifests"
+  if kubectl get namespace calico-system >/dev/null 2>&1; then
+    echo "calico-system namespace exists — applying manifests"
+  fi
+
+  retry kubectl apply -f bootstrap/calico.yaml
+
+  echo ">>> Waiting for all Calico pods to be Ready"
+  kubectl wait -n calico-system --for=condition=Ready pod --all --timeout=600s || {
+    echo "Error: Some Calico pods did not become Ready"
+    kubectl get pods -n calico-system -o wide
+    exit 1
+  }
+}
+
+# -------------------------------------------------------------------
+# Verification
+# -------------------------------------------------------------------
+verify_cluster() {
+  echo ">>> Cluster nodes:"
+  kubectl get nodes -o wide
+
+  echo ">>> All pods in all namespaces:"
+  kubectl get pods -A -o wide
+}
+
+# -------------------------------------------------------------------
+# Execute phased functions
+# -------------------------------------------------------------------
+install_k3s
+setup_kubeconfig
+install_calico_operator
+apply_calico
+verify_cluster
+
+echo "=== Phase 01 complete: cluster ready ==="
+
+>>> bootstrap/02-infra.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "=== Phase 02: Infrastructure Bootstrap ==="
+
+# -------------------------------------------------------------------
+# Helm helper
+# -------------------------------------------------------------------
+helm_install_or_upgrade() {
+  local name="$1"
+  local chart="$2"
+  local namespace="$3"
+  local values="${4:-}"
+
+  echo ">>> Installing/upgrading Helm chart: $name in $namespace"
+  kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  local args=(upgrade --install "$name" "$chart" --namespace "$namespace")
+  [[ -f "$values" ]] && args+=(--values "$values")
+  helm "${args[@]}"
+}
+
+# -------------------------------------------------------------------
+# Preconditions
+# -------------------------------------------------------------------
+for cmd in kubectl helm sops; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "$cmd not found, install or run 01-cluster.sh first"; exit 1; }
+done
+kubectl get nodes >/dev/null
+
+# -------------------------------------------------------------------
+# Helm repos
+# -------------------------------------------------------------------
+declare -A HELM_REPOS=(
+  [traefik]=https://traefik.github.io/charts
+  [jetstack]=https://charts.jetstack.io
+  [sops-operator]=https://isindir.github.io/sops-secrets-operator/
+  [community-charts]=https://community-charts.github.io/helm-charts
+)
+
+for repo in "${!HELM_REPOS[@]}"; do
+  helm repo add "$repo" "${HELM_REPOS[$repo]}" 2>/dev/null || true
+done
+helm repo update
+
+# -------------------------------------------------------------------
+# Apply static resources
+# -------------------------------------------------------------------
+echo ">>> Applying namespaces"
+kubectl apply -f "${ROOT_DIR}/helm/infra/static/namespaces"
+
+echo ">>> Applying issuers (ClusterIssuers, Root CAs)"
+kubectl apply -f "${ROOT_DIR}/helm/infra/static/issuers"
+
+# -------------------------------------------------------------------
+# Install operators via Helm
+# -------------------------------------------------------------------
+declare -A OPERATORS=(
+  [cert-manager]="${ROOT_DIR}/helm/infra/operators/cert-manager"
+  [traefik]="${ROOT_DIR}/helm/infra/operators/traefik"
+  [sops-operator]="${ROOT_DIR}/helm/infra/operators/sops-operator"
+  [cloudflared]="${ROOT_DIR}/helm/infra/operators/cloudflared"
+)
+
+for op in "${!OPERATORS[@]}"; do
+  CHART_DIR="${OPERATORS[$op]}"
+  VALUES_FILE="$CHART_DIR/values.yaml"
+  helm_install_or_upgrade "$op" "$CHART_DIR" "$op" "$VALUES_FILE"
+
+  # Wait for deployment if exists
+  if kubectl get deployment -n "$op" >/dev/null 2>&1; then
+    kubectl rollout status deployment -n "$op" --timeout=180s
+  fi
+done
+
+# -------------------------------------------------------------------
+# Verification
+# -------------------------------------------------------------------
+echo ">>> Verifying infrastructure state"
+kubectl get pods --all-namespaces
+kubectl get ingressclasses
+kubectl get crds | grep -E 'traefik|cert-manager|sops'
+
+echo "=== Phase 02 complete: infrastructure + operators ready ==="
+
+>>> bootstrap/03-smoke.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "=== Phase 03: Infra Smoke Test ==="
+
+# -------------------------------------------------------------------
+# Create temporary test secret with SOPS
+# -------------------------------------------------------------------
+TMP_NS="default"
+TMP_SECRET="test-sopssecret"
+TMP_FILE="$(mktemp /tmp/test-sopssecret.XXXX.yaml)"
+
+cat > "$TMP_FILE" <<EOF
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+  name: $TMP_SECRET
+  namespace: $TMP_NS
+spec:
+  suspend: false
+  secretTemplates:
+    - name: $TMP_SECRET
+      stringData:
+        password: test
+EOF
+
+ENC_FILE="${TMP_FILE}.sops.yaml"
+sops -e "$TMP_FILE" > "$ENC_FILE"
+
+kubectl apply -f "$ENC_FILE"
+
+# -------------------------------------------------------------------
+# Verify secret exists and decodes correctly
+# -------------------------------------------------------------------
+TIMEOUT=30
+for i in $(seq 1 $TIMEOUT); do
+  if kubectl get secret $TMP_SECRET -n $TMP_NS >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+
+echo -n "Decoded secret: "
+kubectl get secret $TMP_SECRET -n $TMP_NS -o jsonpath='{.data.password}' | base64 -d
+echo
+
+# -------------------------------------------------------------------
+# Cleanup
+# -------------------------------------------------------------------
+kubectl delete secret $TMP_SECRET -n $TMP_NS
+kubectl delete sopssecret $TMP_SECRET -n $TMP_NS
+rm -f "$TMP_FILE" "$ENC_FILE"
+
+echo "=== SOPS secret smoke test complete ==="
+
+>>> bootstrap/04-platform.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "$0")/lib/apply-layer.sh"
+
+for svc in helm/platform/*; do
+  [[ -d "$svc/k8s" ]] && apply-layer "$svc/k8s"
+  [[ -f "$svc/values.yaml" ]] && \
+    helm upgrade --install "$(basename "$svc")" "$svc" \
+      -f "$svc/values.yaml"
+done
+
+>>> bootstrap/k8s/calico.yaml <<<
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+      - name: default-ipv4-ippool
+        blockSize: 26
+        cidr: 10.10.250.0/24
+        encapsulation: VXLANCrossSubnet
+        natOutgoing: Enabled
+        nodeSelector: all()
+
+---
+# This section configures the Calico API server.
+# For more information, see: https://docs.tigera.io/calico/latest/reference/installation/api#operator.tigera.io/v1.APIServer
+apiVersion: operator.tigera.io/v1
+kind: APIServer
+metadata:
+  name: default
+spec: {}
+
+---
+# Configures the Calico Goldmane flow aggregator.
+# apiVersion: operator.tigera.io/v1
+# kind: Goldmane
+# metadata:
+#   name: default
+
+---
+# Configures the Calico Whisker observability UI.
+# apiVersion: operator.tigera.io/v1
+# kind: Whisker
+# metadata:
+#   name: default
+
+>>> bootstrap/lib/apply-layer.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+DIR="$1"
+
+if [[ ! -d "$DIR" ]]; then
+  echo "Directory not found: $DIR"
+  exit 1
+fi
+
+# Apply manifests in numeric order (10-, 20-, etc.) then others
+mapfile -t FILES < <(find "$DIR" -type f -name '*.yaml' | sort)
+
+for f in "${FILES[@]}"; do
+  # Determine if the file is a SOPS secret (encrypted)
+  if [[ "$f" =~ \.sops\.yaml$ ]]; then
+    echo ">>> Applying encrypted secret: $f"
+    sops -d "$f" | kubectl apply -f -
+  else
+    echo ">>> Applying: $f"
+    kubectl apply -f "$f"
+  fi
+done
+
+>>> bootstrap/old-scripts/apply-all.sh <<<
+#!/bin/bash
+set -euo pipefail
+
+NAMESPACE="home"
+CHART_DIR="."
+RELEASE_NAME="smarthome"
+
+echo "⏳ Syncing local subchart versions..."
+./sync-local-versions.sh
+
+echo "⏳ Updating Helm repositories..."
+helm repo update
+
+echo "⏳ Updating chart dependencies..."
+helm dependency update "$CHART_DIR"
+
+echo "⏳ Installing/upgrading umbrella chart..."
+helm upgrade --install "$RELEASE_NAME" "$CHART_DIR" \
+  -n "$NAMESPACE" \
+  --create-namespace \
+  --wait
+
+echo "✅ Deployment complete!"
+
+kubectl get pods -n "$NAMESPACE"
+
+>>> bootstrap/old-scripts/sops-install.sh <<<
+#!/bin/bash
+set -e
+
+echo "=== SOPS + Age + Kubernetes Installer ==="
+
+# --- Prompt for cluster directories ---
+read -rp "Enter the cluster root directory [~/k3s-cluster]: " CLUSTER_ROOT
+CLUSTER_ROOT=${CLUSTER_ROOT:-~/k3s-cluster}
+CLUSTER_ROOT=$(realpath "$CLUSTER_ROOT")
+
+read -rp "Enter the sops-operator Helm chart directory relative to cluster root [./infrastructure/sops-operator]: " HELM_CHART_DIR
+HELM_CHART_DIR=${HELM_CHART_DIR:-infrastructure/sops-operator}
+HELM_CHART_PATH=$(realpath "$CLUSTER_ROOT/$HELM_CHART_DIR")
+
+
+read -rp "Enter the path to .sops.yaml relative to cluster root [./.sops.yaml]: " SOPS_YAML_REL
+SOPS_YAML_REL=${SOPS_YAML_REL:-.sops.yaml}
+SOPS_YAML=$(realpath "$CLUSTER_ROOT/$SOPS_YAML_REL")
+
+# --- 1. Install Age ---
+echo "==> Installing Age"
+sudo apt update
+sudo apt install -y age
+age --version
+
+# --- 2. Generate or reuse Age key ---
+AGE_HOME_DIR="$HOME/.config/sops/age"
+mkdir -p "$AGE_HOME_DIR"
+
+if [[ ! -f "$AGE_HOME_DIR/key.txt" ]]; then
+  echo "==> Generating Age keypair"
+  age-keygen -o "$AGE_HOME_DIR/keys.txt"
+  chmod 600 "$AGE_HOME_DIR/keys.txt"
+
+  # Extract private key
+  sed '/^#/d' "$AGE_HOME_DIR/keys.txt" > "$AGE_HOME_DIR/key.txt"
+  chmod 600 "$AGE_HOME_DIR/key.txt"
+
+  # Extract public key
+  grep '^# public key:' "$AGE_HOME_DIR/keys.txt" | awk '{print $4}' > "$AGE_HOME_DIR/pub.txt"
+  chmod 644 "$AGE_HOME_DIR/pub.txt"
+else
+  echo "==> Reusing existing Age keypair"
+fi
+
+PUBLIC_KEY=$(cat "$AGE_HOME_DIR/pub.txt")
+
+# --- 3. Install SOPS ---
+echo "==> Installing SOPS"
+SOPS_LATEST=$(curl -s https://api.github.com/repos/getsops/sops/releases/latest | \
+              jq -r '.assets[] | select(.name | test("linux.amd64$")) | .browser_download_url')
+sudo curl -L "$SOPS_LATEST" -o /usr/local/bin/sops
+sudo chmod +x /usr/local/bin/sops
+sops --version
+
+# --- 4. Add Helm repo ---
+echo "==> Adding sops-operator Helm repo"
+helm repo add sops-operator https://isindir.github.io/sops-secrets-operator/
+helm repo update
+
+# --- 5. Create Age key secret ---
+echo "==> Creating Kubernetes secret for Age key"
+kubectl create namespace sops-operator --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic age-key \
+    -n sops-operator \
+    --from-file=key.txt="$AGE_HOME_DIR/key.txt" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+# --- 6. Write operator values.yaml ---
+VALUES_FILE="$HELM_CHART_PATH/values.yaml"
+mkdir -p "$(dirname "$VALUES_FILE")"
+cat > "$VALUES_FILE" <<EOF
+secretsAsFiles:
+  - name: sops-age-key
+    secretName: age-key
+    mountPath: /etc/sops-age-key
+
+extraEnv:
+  - name: SOPS_AGE_KEY_FILE
+    value: /etc/sops-age-key/key.txt
+EOF
+
+# --- 7. Install SOPS Secrets Operator ---
+echo "==> Installing SOPS Secrets Operator"
+helm upgrade --install sops-operator sops-operator/sops-secrets-operator \
+    --namespace sops-operator \
+    --values "$VALUES_FILE"
+
+# --- 8. Create .sops.yaml with the public key ---
+mkdir -p "$(dirname "$SOPS_YAML")"
+cat > "$SOPS_YAML" <<EOF
+creation_rules:
+  - path_regex: .*/.*secrets?\.yaml$
+    encrypted_regex: '^(data|stringData)$'
+    age:
+      - $PUBLIC_KEY
+EOF
+
+# --- 9. Generate a test secret ---
+TEST_SECRET="$HELM_CHART_PATH/secret.yaml"
+cat > "$TEST_SECRET" <<EOF
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+  name: test-sopssecret
+  namespace: default
+spec:
+  suspend: false
+  secretTemplates:
+    - name: test-secret
+      stringData:
+        password: test
+EOF
+
+# Encrypt the test secret
+ENC_SECRET="${TEST_SECRET%.yaml}.enc.yaml"
+sops -e "$TEST_SECRET" > "$ENC_SECRET"
+
+echo "==> Test secret generated at $ENC_SECRET"
+
+# --- Apply the encrypted secret ---
+kubectl apply -f "$ENC_SECRET"
+
+# --- Wait for Secret to be created ---
+echo "==> Waiting for secret 'test-secret' to be created..."
+TIMEOUT=30
+for i in $(seq 1 $TIMEOUT); do
+    if kubectl get secret test-secret -n default >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+if ! kubectl get secret test-secret -n default >/dev/null 2>&1; then
+    echo "Error: Secret test-secret not created after $TIMEOUT seconds"
+    exit 1
+fi
+
+# --- Verify and decode the secret ---
+echo "==> Verifying secret content:"
+kubectl get secret test-secret -n default -o jsonpath='{.data.password}' | base64 -d
+echo
+
+# --- Cleanup ---
+echo "==> Cleaning up test resources..."
+kubectl delete secret test-secret -n default
+kubectl delete sopssecret test-sopssecret -n default
+rm -f "$ENC_SECRET"
+
+# Rename original secret.yaml to example-secret.yaml
+mv "$TEST_SECRET" "${HELM_CHART_PATH}/example-secret.yaml"
+
+echo "==> Test completed and cleaned up. Original secret.yaml renamed to example-secret.yaml."
+echo ""
+cat <<EOF
+
+Usage Example:
+1. Create secret.yaml
+
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+  name: <sopssecret-name>
+  namespace: <namespace>
+spec:
+  suspend: false
+  secretTemplates:
+    - name: <secret-name>
+      stringData:
+        <key>: test
+
+2. Encrypt:      sops -e secret.yaml > secret.enc.yaml
+3. Apply:        kubectl apply -f secret.enc.yaml
+4. Verify:       kubectl get secret <secret-name> -n <namespace>
+5. Decode field: kubectl get secret <secret-name> -n <namespace> -o jsonpath='{.data.<key>}' | base64 -d
+6. Cleanup:      kubectl delete secret <secret-name> -n <namespace>
+                 kubectl delete sopssecret <sopssecret-name> -n <namespace>
+
+EOF
+>>> bootstrap/old-scripts/sops-uninstall.sh <<<
+#!/bin/bash
+set -e
+
+echo "==> Uninstalling SOPS Secrets Operator Helm chart"
+helm uninstall sops-operator -n sops-operator || true
+
+echo "==> Removing SOPS Operator Repo"
+helm repo remove sops-operator || true
+
+echo "==> Deleting sops-operator namespace"
+kubectl delete namespace sops-operator --ignore-not-found
+
+echo "==> Deleting SopsSecret custom resources"
+kubectl get sopssecrets --all-namespaces -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name | tail -n +2 | while read ns name; do
+    echo "Deleting SopsSecret $name in namespace $ns"
+    kubectl delete sopssecret "$name" -n "$ns" --ignore-not-found
+done
+
+echo "==> Deleting any SOPS-related secrets"
+kubectl get secrets --all-namespaces -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name | grep -i 'age\|sops' | while read ns name; do
+    echo "Deleting secret $name in namespace $ns"
+    kubectl delete secret "$name" -n "$ns" --ignore-not-found
+done
+
+echo "==> Removing SOPS binary"
+sudo rm -f /usr/local/bin/sops
+
+echo "==> Removing Age binary"
+sudo apt remove -y age || true
+sudo rm -f /usr/local/bin/age
+
+echo "==> Cleaning up local configuration"
+rm -rf ~/.config/sops
+rm -rf ~/.config/age
+rm -f ~/k3s-cluster/.sops.yaml
+rm -rf ~/k3s-cluster/infrastructure/sops-operator
+
+echo "==> Removing encrypted SOPS files"
+find ~/k3s-cluster/infrastructure -type f -name '*.enc.yaml' -exec rm -f {} \;
+
+echo "==> Cleanup complete"
+
+>>> bootstrap/old-scripts/sync-local-versions.sh <<<
+#!/bin/bash
+set -euo pipefail
+
+UMBRELLA_CHART="Chart.yaml"
+CHARTS_DIR="./charts"
+
+SUBCHARTS=()
+for d in "$CHARTS_DIR"/*/ ; do
+    [[ -d "$d" ]] || continue
+    SUBCHARTS+=("$(basename "$d")")
+done
+
+echo "🔄 Syncing local subchart versions into $UMBRELLA_CHART"
+
+for subchart in "${SUBCHARTS[@]}"; do
+    CHART_FILE="$CHARTS_DIR/$subchart/Chart.yaml"
+
+    if [[ ! -f "$CHART_FILE" ]]; then
+        echo "⚠️  Chart.yaml not found for $subchart, skipping"
+        continue
+    fi
+
+    VERSION=$(grep '^version:' "$CHART_FILE" | awk '{print $2}')
+    if [[ -z "$VERSION" ]]; then
+        echo "⚠️  No version found in $CHART_FILE, skipping"
+        continue
+    fi
+
+    # Only match uncommented subcharts
+    if grep -q "^[[:space:]]*-\s*name: $subchart" "$UMBRELLA_CHART"; then
+        # Update version preserving indentation
+        awk -v name="$subchart" -v ver="$VERSION" '
+        $0 ~ "^[[:space:]]*- *name: "name {
+            print
+            # loop until we find a non-commented version line
+            while(getline) {
+                if ($0 ~ /^[[:space:]]*version:/) {
+                    match($0, /^([[:space:]]*)version:/, m)
+                    print m[1] "version: " ver
+                    break
+                } else {
+                    print
+                }
+            }
+            next
+        }
+        { print }
+        ' "$UMBRELLA_CHART" > "$UMBRELLA_CHART.tmp" && mv "$UMBRELLA_CHART.tmp" "$UMBRELLA_CHART"
+
+        echo "✅ Updated $subchart to version $VERSION"
+    else
+        echo "ℹ️  $subchart is commented out or not in umbrella chart, skipping"
+    fi
+done
+
+echo "✅ Sync complete!"
+
+>>> bootstrap/old-scripts/traefik-reinstall.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAMESPACE="traefik"
+CHART_NAME="traefik"
+CHART_REPO="traefik/traefik"
+VALUES_FILE="infrastructure/traefik/values.yaml"
+#RESOURCES=(
+#  "traefik-cm.yaml"
+#  "traefik-pvc.yaml"
+#  "traefik-ingress.yaml"
+#  "traefik-secrets.yaml"
+#)
+RESOURCES=("traefik-manifests/")
+# ACME_FILE="infrastructure/traefik/files/default-acme.json"
+SHOW_LOGS=false
+
+if [ "${1:-}" == "--logs" ]; then
+    SHOW_LOGS=true
+fi
+
+echo "=== Cleaning up existing namespace ==="
+kubectl delete ns "$NAMESPACE" --ignore-not-found --wait
+
+echo "=== Creating namespace ==="
+kubectl create ns "$NAMESPACE"
+
+echo "=== Applying supporting resources ==="
+for res in "${RESOURCES[@]}"; do
+    echo "Applying $res"
+    kubectl apply -f "$res" -n "$NAMESPACE"
+done
+
+echo "=== Installing Traefik with Helm ==="
+helm install "$CHART_NAME" "$CHART_REPO" -n "$NAMESPACE" --values "$VALUES_FILE"
+
+echo "=== Waiting for Traefik pod to be ready ==="
+TIMEOUT=180
+ELAPSED=0
+INTERVAL=5
+POD_NAME=""
+
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    POD_NAME=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=traefik \
+               -o jsonpath='{.items[0].metadata.name}' || true)
+    if [ -n "$POD_NAME" ]; then
+        READY=$(kubectl get pod $POD_NAME -n $NAMESPACE \
+                -o jsonpath='{.status.containerStatuses[0].ready}' || echo "false")
+        if [ "$READY" == "true" ]; then
+            echo "Traefik pod is ready: $POD_NAME"
+            break
+        fi
+    fi
+    sleep $INTERVAL
+    ELAPSED=$((ELAPSED + INTERVAL))
+done
+
+if [ -z "$POD_NAME" ]; then
+    echo "Error: No Traefik pod found after $TIMEOUT seconds"
+    exit 1
+fi
+
+# echo "=== Checking ACME file in Traefik container ==="
+# ACME_PATH="/etc/letsencrypt/acme.json"
+
+# IS_EMPTY=$(kubectl exec -n $NAMESPACE "$POD_NAME" -- sh -c "test -s $ACME_PATH || echo empty" || true)
+
+# if [ "$IS_EMPTY" == "empty" ]; then
+#     echo "ACME file is empty, copying default..."
+#     kubectl cp "$ACME_FILE" "$NAMESPACE/$POD_NAME:$ACME_PATH"
+#     # Ensure correct permissions
+#     kubectl exec -n $NAMESPACE "$POD_NAME" -- sh -c "chmod 600 $ACME_PATH"
+#     echo "Default ACME file copied successfully into Traefik container."
+# else
+#     echo "ACME file already has content, skipping copy."
+# fi
+
+if [ "$SHOW_LOGS" = true ]; then
+    echo "Tailing Traefik logs..."
+    kubectl logs -n $NAMESPACE -f "$POD_NAME"
+fi
+
+>>> bootstrap/wrapper.sh <<<
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Kubernetes Homelab Bootstrap Wrapper ==="
+
+# -------------------------------------------------------------------
+# Phase scripts
+# -------------------------------------------------------------------
+PHASE0="00-host.sh"
+PHASE1="01-cluster.sh"
+PHASE2="02-infra.sh"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# -------------------------------------------------------------------
+# Helper: run a phase safely
+# -------------------------------------------------------------------
+run_phase() {
+    local phase_name="$1"
+    local script_path="$2"
+
+    if [[ ! -f "$script_path" ]]; then
+        echo "Error: $phase_name script not found at $script_path"
+        exit 1
+    fi
+
+    echo ""
+    echo ">>> Running $phase_name"
+    echo ">>> Script: $script_path"
+    bash "$script_path"
+    echo ">>> $phase_name complete"
+}
+
+# -------------------------------------------------------------------
+# Phase 0: Host tooling
+# -------------------------------------------------------------------
+run_phase "Phase 00: Host Tooling" "$SCRIPT_DIR/$PHASE0"
+
+# -------------------------------------------------------------------
+# Phase 1: Cluster bootstrap
+# -------------------------------------------------------------------
+if ! command -v kubectl >/dev/null 2>&1; then
+    echo "Error: kubectl not found after Phase 0. Ensure k3s is installed correctly."
+    exit 1
+fi
+
+run_phase "Phase 01: Cluster Bootstrap" "$SCRIPT_DIR/$PHASE1"
+
+# -------------------------------------------------------------------
+# Phase 2: Infrastructure & Helm operators
+# -------------------------------------------------------------------
+if ! kubectl get nodes >/dev/null 2>&1; then
+    echo "Error: Cluster not reachable after Phase 1. Aborting Phase 2."
+    exit 1
+fi
+
+run_phase "Phase 02: Infrastructure & Operators" "$SCRIPT_DIR/$PHASE2"
+
+# -------------------------------------------------------------------
+# Final verification
+# -------------------------------------------------------------------
+echo ""
+echo "=== Bootstrap complete: verifying cluster state ==="
+kubectl get nodes -o wide
+kubectl get pods -A -o wide
+kubectl get crds | grep -E 'traefik|cert-manager|sops' || true
+kubectl get ingressclasses || true
+
+echo "=== All phases completed successfully ==="
+
+>>> docs/README.md <<<
+
+>>> helm/apps/debug/busybox.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: net-tools
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: busybox
+  namespace: net-tools
+spec:
+  containers:
+  - name: busybox
+    image: busybox:1.36
+    command:
+      - sleep
+      - "3600"
+    securityContext:
+      runAsUser: 0
+  restartPolicy: Never
+
+>>> helm/apps/home-assistant/Chart.yaml <<<
+apiVersion: v2
+name: home-assistant
+description: "Home Assistant deployment for smart home services"
+type: application
+version: 1.0.0
+appVersion: "2025.12.0" # replace with actual HA version
+keywords:
+  - home-assistant
+  - automation
+maintainers:
+  - name: Brandon
+    email: brandonhowlett@gmail.com
+>>> helm/apps/home-assistant/k8s/00-namespace.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: home-assistant
+  labels:
+    app: home-assistant
+
+>>> helm/apps/home-assistant/k8s/30-certificates.yaml <<<
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: home-assistant-internal
+  namespace: home-assistant
+spec:
+  secretName: home-assistant-internal-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: clusterissuer-lan-smarthome
+    kind: ClusterIssuer
+  commonName: ha.smart.home
+  dnsNames:
+    - ha.smart.home
+    - home-assistant.home-assistant.svc.cluster.local
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: home-assistant-external
+  namespace: home-assistant
+spec:
+  secretName: home-assistant-external-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: clusterissuer-cloudflare
+    kind: ClusterIssuer
+  commonName: haos.brandonhowlett.com
+  dnsNames:
+    - haos.brandonhowlett.com
+
+>>> helm/apps/home-assistant/k8s/40-ingress.yaml <<<
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: home-assistant-internal
+  namespace: home-assistant
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`ha.smart.home`)
+      kind: Rule
+      services:
+        - name: home-assistant
+          port: 8123
+  tls:
+    # secretName: home-assistant-internal-tls
+    secretName: smarthome-wildcard-tls
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: home-assistant-external
+  namespace: home-assistant
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`haos.brandonhowlett.com`)
+      kind: Rule
+      services:
+        - name: home-assistant
+          port: 8123
+  # tls:
+  #   secretName: home-assistant-external-tls
+>>> helm/apps/home-assistant/values.yaml <<<
+image:
+  tag: stable
+
+persistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  size: 20Gi
+  storageClass: local-path
+
+# Service
+service:
+  type: ClusterIP
+  port: 8123
+
+# Ingress via Traefik
+ingress:
+  enabled: false
+  # Set to true to allow Traefik to route traffic correctly
+  external: true
+  annotations:
+    # kubernetes.io/ingress.class: traefik
+    cert-manager.io/cluster-issuer: clusterissuer-cloudflare
+    # traefik.ingress.kubernetes.io/router.entrypoints: "websecure"
+    # traefik.ingress.kubernetes.io/router.tls: "true"
+  # hosts:
+  #   - host: ha.smart.home
+  #     paths:
+  #       - /
+  #   - host: haos.brandonhowlett.com
+  #     paths:
+  #       - /
+  # tls:
+  #   - hosts:
+  #       - ha.smart.home
+  #     secretName: ha-smart-home-tls
+  #   - hosts:
+  #       - haos.brandonhowlett.com
+  #     secretName: haos-brandonhowlett-tls
+
+# Optional: Addons or integrations can be defined here
+addons: {}
+
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+
+configuration:
+  enabled: true
+  trusted_proxies:
+    - 10.0.0.0/8
+  initContainer:
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+>>> helm/apps/whoami/k8s/00-namespace.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: whoami
+  labels:
+    app: whoami
+
+>>> helm/apps/whoami/k8s/20-certificates.yaml <<<
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: whoami-internal
+  namespace: whoami
+spec:
+  secretName: whoami-internal-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: clusterissuer-lan-smarthome
+    kind: ClusterIssuer
+  commonName: whoami.smart.home
+  dnsNames:
+    - whomai.smart.home
+    - whoami.whoami.svc.cluster.local
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: whoami-external
+  namespace: whoami
+spec:
+  secretName: whoami-external-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: clusterissuer-cloudflare
+    kind: ClusterIssuer
+  commonName: whoami.brandonhowlett.com
+  dnsNames:
+    - whoami.brandonhowlett.com
+
+>>> helm/apps/whoami/k8s/40-ingress.yaml <<<
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: whoami-internal
+  namespace: whoami
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`whoami.smart.home`)
+      kind: Rule
+      services:
+        - name: whoami
+          port: 80
+  tls:
+    # secretName: whoami-internal-tls
+    secretName: smarthome-wildcard-tls
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: whoami-external
+  namespace: whoami
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`whoami.brandonhowlett.com`)
+      kind: Rule
+      services:
+        - name: whoami
+          port: 80
+  # tls:
+  #   secretName: home-assistant-external-tls
+>>> helm/apps/whoami/k8s/deployment.yaml <<<
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami
+  namespace: whoami
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whoami
+  template:
+    metadata:
+      labels:
+        app: whoami
+    spec:
+      containers:
+        - name: whoami
+          image: containous/whoami:latest
+          ports:
+            - containerPort: 80
+>>> helm/apps/whoami/k8s/service.yaml <<<
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami
+  namespace: whoami
+spec:
+  selector:
+    app: whoami
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+>>> helm/infra/operators/cert-manager/values.yaml <<<
+crds:
+  enabled: true
+
+namespace: cert-manager
+
+extraArgs:
+  - --dns01-recursive-nameservers-only
+  - --dns01-recursive-nameservers=1.1.1.1:53,1.0.0.1:53
+>>> helm/infra/operators/cloudflared/k8s/10-secret.sops.yaml <<<
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+    name: cloudflared-tunnel-secrets
+    namespace: cloudflared
+spec:
+    suspend: false
+    secretTemplates:
+        - name: cloudflared-tunnel-secrets
+          stringData:
+            cert.pem: ENC[AES256_GCM,data:hS83TfIEgzidZhcrloIcqf1jFxt5fP2B8qwtkXE7hIXpDhFSEWdlKIgJExthcrkbZZaU8NFVsVo8Wb3iGmgBAbR+ZUpZfBeJzPnFKCxYCQUdXc6sxZjoX18lOw9Ub1ilinWxOw0Ir+K036ZiFS8R8Hq7k04LCF15jY+wmdkDp3qflcRicea2BFOzJjoOQL1uVZIPCkpC//QrWfugChR7PeSMyeu/0G375/CI7GgFrPbSs+WWuLqSkJTkacfDAu434Fp08AmtITaO1rlu8nYi580TkkHvjpXNCQI3p7mhFNv+oYLNMsO+I1rMxSl/8l5G6c8pP9f/yfCCotXzdZHfsF0b+Jnp+YRkgKA=,iv:LWSZd+Pk1MDBANZBRQWUZoHLBg4HQIzpnI9zdcBJkN8=,tag:zX6T837HVtfsYr71F9O62A==,type:str]
+            credentials.json: ENC[AES256_GCM,data:T3G2kELyaLbyxb5uRdMooHuGV4Fth4QPNgdRiP1FOLKJCE4H7R6F3sn3H6YcG2Pwdb6Jz6LpCUQahpu4bau6vF6vq01tI3lf5k0FcxFKnEHBUswVq0fZsNJQSt+geJnbqoZwN/VW95EtdbBOJdlVbnnRVk0yALyNqRRi5bkv5kKhXxCP1D62DcntrqcbvPz4GmcVycTOuJ8H3v6qlZORmpZV3smhscQ+Rbej4CW5ew==,iv:i/87VDWnZ/SFk9k7ENGWt2Wt8FPm62qh15A12yvbDH0=,tag:TCHrYHoZKJl75jZUh2eTEw==,type:str]
+sops:
+    age:
+        - recipient: age1pqkt694pps8jf408tmn8gg6692mpvh23nw9jvqsfxayy9fjth9msps9fcu
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA3QTNETzRCRnR6ZWdybkUv
+            NUc4c1orWG12ME85YjdVZ0F5bGlIWUhUSlRZCkFEam1FeE5Lb3NqL0VmVlA5dkhM
+            TDBQc1NhOXlGOHJsZENORFR5ZXY3WmcKLS0tIFlPaWFUa3g4S0wxSTdLdWhuRTVI
+            SE1ESVQweGJWQUJUZkhxN0pBUVVRbEkKnsPLa37muveCYfh2GeLqEoSL+D+wF2ee
+            wb0Zo9So6WwER87Hc+GciPV3QtfvT9y+FIQTQX7aAIwR9MZDWnkdhA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2025-12-29T23:37:27Z"
+    mac: ENC[AES256_GCM,data:3/6geQeUpd4RjrEA3w55qP6tDbZuUYMnXALm6gTowZltpkHzADDXcScqirILX7c7o6IUoViDIf+x5Rtq8x+GGtKwL1OQuMOqYNy5ood47N1phyzYhjJHMk0BXMRkOh2kyyZXeuCupfsdmw7dsErwVaNTSd06ZqwQy/qpFmm8wFg=,iv:lF2Hfy1SlzROoBIJnqAaGr8uN1OZf4qvevXeG2VIMXc=,tag:m/71KBMZ2ZfYECz+4Xk10A==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.11.0
+
+>>> helm/infra/operators/cloudflared/values.yaml <<<
+tunnelSecrets:
+  existingPemFileSecret:
+    name: "cloudflared-tunnel-secrets"
+    key: "cert.pem"
+  existingConfigJsonFileSecret:
+    name: "cloudflared-tunnel-secrets"
+    key: "credentials.json"
+
+tunnelConfig:
+  name: traefik-smarthome
+>>> helm/infra/operators/sops-operator/values.yaml <<<
+secretsAsFiles:
+  - name: sops-age-key
+    secretName: age-key
+    mountPath: /etc/sops-age-key
+
+extraEnv:
+  - name: SOPS_AGE_KEY_FILE
+    value: /etc/sops-age-key/key.txt
+>>> helm/infra/operators/traefik/Chart.yaml <<<
+apiVersion: v2
+name: traefik
+description: "Local Helm chart for custom Traefik templates and overrides"
+type: application
+version: 1.0.0
+appVersion: "v0.38.0.1"
+# appVersion: "v3.6.5"
+kubeVersion: ">=1.24.0-0"
+home: https://github.com/traefik/traefik-helm-chart
+sources:
+  - https://github.com/traefik/traefik-helm-chart
+keywords:
+  - traefik
+  - ingress
+  - proxy
+  - load-balancer
+  - ingressroute
+>>> helm/infra/operators/traefik/k8s/10-secret.sops.yaml <<<
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+    name: local-certs
+    namespace: traefik
+spec:
+    suspend: false
+    secretTemplates:
+        - name: local-certs
+          stringData:
+            local-ca.crt: ENC[AES256_GCM,data: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,iv:lYvf3e4DY1WKYEJwool0HYo1qKpvIZbY/Aj+NRBL30c=,tag:DczwNklVTNf/2ZHJysIe0g==,type:str]
+            local-cert.pem: ENC[AES256_GCM,data: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,iv:+KSf9/5FiarUyOwinIMkDC1kYsvEe2Qy9It5UCgyJCk=,tag:QBpwEdnHBZaE0cD5WDezwQ==,type:str]
+            local-key.pem: ENC[AES256_GCM,data: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,iv:oOcWpgzb26OF0dweGhCBMnGWJoIEvhcAmI0X7uW8K7E=,tag:9wXwgez/GxX5ioiyMJKSaQ==,type:str]
+sops:
+    age:
+        - recipient: age1pqkt694pps8jf408tmn8gg6692mpvh23nw9jvqsfxayy9fjth9msps9fcu
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBtQXY0WTJISUVJOVcvVkVI
+            cUh5VmNWRXNwbnNZalhoclZZZTYrMDhudXg0CkdvQWxiY2l0dGNCUFpNc3pLand4
+            Uk1lQVUwMFRKNUlhNTVjU0hNcXVHRU0KLS0tIEhOUUt3eDJETHF1VkxsZ3FybmI5
+            VUtYUVA3aU5TNkx4dDdVY3VwTmxQRzgKbvPzfKiJIGgMAQ8+Tgkc4oJBrOs91vuP
+            AxqoigNhU/DPIlY89xSO9VtqEewhLaGYUXEHb+UhJcdXI+pYtMKt8g==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2025-12-30T05:09:17Z"
+    mac: ENC[AES256_GCM,data:DbqF5swW6fVRviCymuaRs6+bOlhvYF9XbJ6OEnzmgToVgnGHdtZsG1RT/Zi4wphNF8Q5uFLAhCB3TfAsnkNeZOM4uzxp/BM+k99HKAkxDdJT0WP0699IVYzT4Hs2CCcdRF4vrwuF61WvLcg7OubOMRH6vfHyruxUVFu0ybROXJE=,iv:Fl+YbHQ/C6uqia/FasL9eQNIxy4JLDHr+AV4bZG9ae8=,tag:csesd5kKROehMPxP0D0bfQ==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.11.0
+
+>>> helm/infra/operators/traefik/k8s/20-certificates.yaml <<<
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: traefik-internal
+  namespace: traefik
+spec:
+  secretName: traefik-internal-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: clusterissuer-lan-smarthome
+    kind: ClusterIssuer
+  dnsNames:
+    - traefik.smart.home
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: smarthome-wildcard
+  namespace: traefik
+spec:
+  secretName: smarthome-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: clusterissuer-lan-smarthome
+    kind: ClusterIssuer
+  dnsNames:
+    - "*.smart.home"
+    - "smart.home"
+>>> helm/infra/operators/traefik/k8s/40-ingress.yaml <<<
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-root-to-dashboard
+  namespace: traefik
+spec:
+  redirectRegex:
+    regex: ^https://traefik\.smart\.home/?$
+    replacement: https://traefik.smart.home/dashboard/
+    permanent: true
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard-internal
+  namespace: traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`traefik.smart.home`) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService
+    - match: Host(`traefik.smart.home`) && Path(`/`)
+      kind: Rule
+      middlewares:
+        - name: redirect-root-to-dashboard
+      services:
+        - name: api@internal
+          kind: TraefikService
+  tls:
+    secretName: traefik-internal-tls
+    # secretName: smarthome-wildcard-tls
+>>> helm/infra/operators/traefik/templates/dynamic-configmap.yaml <<<
+{{- if .Values.dynamicConfig }}
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traefik-dynamic
+  namespace: {{ .Release.Namespace }}
+data:
+  certificates.yaml: |-
+{{- if .Values.dynamicConfig.certificates | indent 4 }}
+  servers-transports.yaml: |-
+{{- if .Values.dynamicConfig.serversTransports | indent 4 }}
+  middlewares.yaml: |-
+{{- if .Values.dynamicConfig.middlewares | indent 4 }}
+  middlewares-chains.yaml: |-
+{{- if .Values.dynamicConfig.middlewaresChains | indent 4 }}
+
+# ---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: traefik-dynamic
+#   namespace: traefik
+# data:
+#   certificates.yaml: |
+#     tls:
+#       certificates:
+#         - certFile: /etc/certs/local-cert.pem
+#           keyFile: /etc/certs/local-key.pem
+#           stores:
+#             - default
+#       stores:
+#         default:
+#           defaultCertificate:
+#             certFile: /etc/certs/local-cert.pem
+#             keyFile: /etc/certs/local-key.pem
+#   servers-transports.yaml: |
+#     http:
+#       serversTransports:
+#         rootCAs:
+#           - /etc/certs/local-ca.crt
+#         skipVerify:
+#           insecureSkipVerify: true
+#   middlewares.yaml: |
+#     http:
+#       middlewares:
+#         middlewares-basic-auth:
+#           basicAuth:
+#             realm: "Traefik Basic Auth"
+#             usersFile: /shared/www/.htpasswd
+#         middlewares-oauth:
+#           forwardAuth:
+#             address: "http://oauth:4181"
+#             authResponseHeaders:
+#               - X-Forwarded-User
+#             trustForwardHeader: true
+#         middlewares-rate-limit:
+#           rateLimit:
+#             average: 100
+#             burst: 50
+#         middlewares-high-rate-limit:
+#           rateLimit:
+#             average: 200
+#             burst: 100
+#         middlewares-ultra-high-rate-limit:
+#           rateLimit:
+#             average: 400
+#             burst: 200
+#         middlewares-internal-ipallowlist:
+#           ipAllowList:
+#             sourceRange:
+#               - "10.0.0.0/8"
+#         middlewares-secure-headers:
+#           headers:
+#             accessControlAllowMethods:
+#               - GET
+#               - OPTIONS
+#               - PUT
+#             accessControlAllowHeaders:
+#               - "*"
+#             accessControlAllowOriginList:
+#               - "*"
+#             accessControlMaxAge: 100
+#             browserXssFilter: true
+#             contentTypeNosniff: true
+#             contentSecurityPolicy: "frame-ancestors 'self' https://*.brandonhowlett.com https://*.smart.home"
+#             customResponseHeaders:
+#               X-Robots-Tag: "none,noarchive,nosnippet,notranslate,noimageindex,"
+#               server: ""
+#             PermissionsPolicy: "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+#             forceSTSHeader: true
+#             hostsProxyHeaders:
+#               - X-Forwarded-Host
+#             referrerPolicy: same-origin
+#             stsIncludeSubdomains: true
+#             stsPreload: true
+#             stsSeconds: 63072000
+
+#         middlewares-real-ip:
+#           plugin:
+#             traefik-real-ip:
+#               excludednets:
+#                 - 1.1.1.1/24
+#   middlewares-chains.yaml: |
+#     http:
+#       middlewares:
+#         ##  Google Oauth Authentication
+#         chain-basic-auth:
+#           chain:
+#             middlewares:
+#               - middlewares-secure-headers
+#               - middlewares-rate-limit
+#               - middlewares-basic-auth
+#         chain-no-auth:
+#           chain:
+#             middlewares:
+#               - middlewares-secure-headers
+#               - middlewares-rate-limit
+#         chain-hrl-no-auth:
+#           chain:
+#             middlewares:
+#               - middlewares-secure-headers
+#               - middlewares-high-rate-limit
+#         chain-oauth:
+#           chain:
+#             middlewares:
+#               - middlewares-secure-headers
+#               - middlewares-rate-limit
+#               - middlewares-oauth
+#         chain-hrl-oauth:
+#           chain:
+#             middlewares:
+#               - middlewares-secure-headers
+#               - middlewares-high-rate-limit
+#               - middlewares-oauth
+>>> helm/infra/operators/traefik/templates/plugins-pvc.yaml <<<
+{{- if .Values.pluginsPVC }}  # Custom template section
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.pluginsPVC.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - {{ .Values.pluginsPVC.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.pluginsPVC.size }}
+
+>>> helm/infra/operators/traefik/values.yaml <<<
+crds:
+  enabled: true
+
+deployment:  # Ref line 19
+  additionalVolumes:  # Ref line 67
+    - name: dynamic-config
+      configMap:
+        name: traefik-dynamic
+        defaultMode: 420
+    - name: plugins
+      persistentVolumeClaim:
+        claimName: traefik-plugins-pvc
+    - name: tls-certs
+      secret:
+        secretName: local-certs
+
+ingressClass:  # Ref line 116
+  enabled: true
+  isDefaultClass: true
+
+experimental:  # Ref line 127
+  plugins:
+    traefik-real-ip:
+      moduleName: github.com/soulbalz/traefik-real-ip
+      version: v1.0.3
+
+ingressRoute:  # Ref line 202
+  dashboard:  # Ref line 203
+    enabled: false
+  healthcheck:  # Ref line 224
+    enabled: true
+    entryPoint: websecure
+
+api:  # Ref line 195
+  dashboard: true
+
+additionalVolumeMounts:  # Ref line 420
+  - name: plugins
+    mountPath: /plugins-storage
+  - name: dynamic-config
+    mountPath: /etc/traefik/dynamic
+  - name: tls-certs
+    mountPath: /etc/certs
+    readOnly: true
+
+logs:  # Ref line 425
+  general:  # Ref line 426
+    level: INFO
+  access:  # Ref line 478
+    enabled: true
+    bufferingSize: 100
+
+global:  # Ref line 764
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+additionalArguments:  # Ref line 787
+  - --serverstransport.rootcas=/etc/certs/local-ca.crt
+  - --providers.file.watch=true
+  - --providers.file.directory=/etc/traefik/dynamic/
+
+dynamicConfig:  # Custom template section
+  certificates: |
+    tls:
+      # certificates:
+      #   - certFile: /etc/certs/local-cert.pem
+      #     keyFile: /etc/certs/local-key.pem
+      #     stores:
+      #       - default
+      stores:
+        default:
+          defaultCertificate:
+            certFile: /etc/certs/local-cert.pem
+            keyFile: /etc/certs/local-key.pem
+  serversTransports: |
+    http:
+      serversTransports:
+        default:
+          insecureSkipVerify: true
+          rootcas:
+            - /etc/certs/local-ca.crt
+  middlewares: |
+    http:
+      middlewares:
+        middlewares-basic-auth:
+          basicAuth:
+            realm: "Traefik Basic Auth"
+            usersFile: /shared/www/.htpasswd
+        middlewares-oauth:
+          forwardAuth:
+            address: "http://oauth:4181"
+            authResponseHeaders:
+              - X-Forwarded-User
+            trustForwardHeader: true
+        middlewares-rate-limit:
+          rateLimit:
+            average: 100
+            burst: 50
+        middlewares-high-rate-limit:
+          rateLimit:
+            average: 200
+            burst: 100
+        middlewares-ultra-high-rate-limit:
+          rateLimit:
+            average: 400
+            burst: 200
+        middlewares-internal-ipallowlist:
+          ipAllowList:
+            sourceRange:
+              - "10.0.0.0/8"
+        middlewares-secure-headers:
+          headers:
+            accessControlAllowMethods:
+              - GET
+              - OPTIONS
+              - PUT
+            accessControlAllowHeaders:
+              - "*"
+            accessControlAllowOriginList:
+              - "*"
+            accessControlMaxAge: 100
+            browserXssFilter: true
+            contentTypeNosniff: true
+            contentSecurityPolicy: "frame-ancestors 'self' https://*.brandonhowlett.com https://*.smart.home"
+            customResponseHeaders:
+              X-Robots-Tag: "none,noarchive,nosnippet,notranslate,noimageindex,"
+              server: ""
+            PermissionsPolicy: "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+            forceSTSHeader: true
+            hostsProxyHeaders:
+              - X-Forwarded-Host
+            referrerPolicy: same-origin
+            stsIncludeSubdomains: true
+            stsPreload: true
+            stsSeconds: 63072000
+
+        middlewares-real-ip:
+          plugin:
+            traefik-real-ip:
+              excludednets:
+                - 1.1.1.1/24
+  middlewaresChains: |
+    http:
+      middlewares:
+        ##  Google Oauth Authentication
+        chain-basic-auth:
+          chain:
+            middlewares:
+              - middlewares-secure-headers
+              - middlewares-rate-limit
+              - middlewares-basic-auth
+        chain-no-auth:
+          chain:
+            middlewares:
+              - middlewares-secure-headers
+              - middlewares-rate-limit
+        chain-hrl-no-auth:
+          chain:
+            middlewares:
+              - middlewares-secure-headers
+              - middlewares-high-rate-limit
+        chain-oauth:
+          chain:
+            middlewares:
+              - middlewares-secure-headers
+              - middlewares-rate-limit
+              - middlewares-oauth
+        chain-hrl-oauth:
+          chain:
+            middlewares:
+              - middlewares-secure-headers
+              - middlewares-high-rate-limit
+              - middlewares-oauth
+
+ports:  # Ref line 799
+  # web:  # Ref line 832
+  #   redirections:  # Handled by Cloudflare SSL; Breaks cloudflared tunnel
+  #     entryPoint:
+  #       to: websecure
+  websecure:  # Ref line 882
+    forwardedHeaders:  # Ref line 924
+      insecure: true
+      trustedIPs:
+        # Cloudflare IPv4
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 141.101.64.0/18
+        - 108.162.192.0/18
+        - 190.93.240.0/20
+        - 188.114.96.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 162.158.0.0/15
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 172.64.0.0/13
+        - 131.0.72.0/22
+        # Local / RFC1918
+        - 127.0.0.1/32
+        - 10.0.0.0/8
+        - 192.168.0.0/16
+        - 172.16.0.0/12
+    tls:  # Ref line 944
+      enabled: true
+      options: default
+  mqtt:
+    port: 1883
+  mqtt-secure:
+    port: 8883
+    tls:
+      enabled: true
+  wss:
+    port: 9001
+
+tlsOptions:  # Ref line 992
+  default:
+    minVersion: VersionTLS12
+    cipherSuites:
+      - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+      - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+      - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+      - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+      - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+      - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+      - TLS_AES_128_GCM_SHA256
+      - TLS_AES_256_GCM_SHA384
+      - TLS_CHACHA20_POLY1305_SHA256
+      - TLS_FALLBACK_SCSV
+    curvePreferences:
+      - CurveP521
+      - CurveP384
+    sniStrict: true
+
+pluginsPVC:  # Custom template section
+  name: traefik-plugins-pvc
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+>>> helm/infra/static/issuers/k8s/10-secret.sops.yaml <<<
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+    name: cloudflare-api-token
+    namespace: cert-manager
+spec:
+    suspend: false
+    secretTemplates:
+        - name: cloudflare-api-token
+          stringData:
+            api-token: ENC[AES256_GCM,data:Lt2pi3yTqd/yf3nzLSnJCiqCgZbCYS5FcMMRC0zIEp3T+7A7fiNsfA==,iv:IuWPBDha/Le2LFm1K8/597+8UfcWwybD8ixlXBHdxkE=,tag:ODLUh7sVIEGocITMR218pg==,type:str]
+sops:
+    age:
+        - recipient: age1pqkt694pps8jf408tmn8gg6692mpvh23nw9jvqsfxayy9fjth9msps9fcu
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBDaFR5R1pBVEFxTzVyb0pq
+            YTlYN3I3MVNPKzVxajIxQU5SVXFyUDczL2xjCkRtNUhtZ1oxdVFUc3lEczdmWGNO
+            Q2tEWnFERngzMWdIVjM4VWUvbDZVR0EKLS0tIERiWEVSblRSRTcybzRKdnoxMzB4
+            M0lHQVdBeE1RMmR5N0tUbHQ2OUg4OFUKDUTMjvlmhntkFF6EI35yKDIMFx90hYAA
+            T/iPnB+mKTs1M8btnJCCFtJll7BU46QvtSnNdztfLMOf1Hp68lhsww==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2025-12-30T05:59:27Z"
+    mac: ENC[AES256_GCM,data:nljENUTBl/Ty+iYpWsoQNoYJc7/ca36v+0d1X1HBybSX08Zg2GrnN/3O1BjVVjTJuNDnL5/8knwHNHJ8RhBuK0KTIXDyshYxBWMMCZo5X1fHMl5S3p6TL0B8YnXD3UAtLjScKtKKdmrZwLjgHBVecYVmL5VrmjKh4tlOYxGpl6o=,iv:w9P4U/vKVIH9mw6uUrS9pECm1/Z7ikvMpGf16eMvQpE=,tag:k4SxnUh4S95yfgbMNq3L8w==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.11.0
+
+---
+apiVersion: isindir.github.com/v1alpha3
+kind: SopsSecret
+metadata:
+    name: smarthome-root-ca
+    namespace: cert-manager
+spec:
+    suspend: false
+    secretTemplates:
+        - name: smarthome-root-ca
+          stringData:
+            tls.crt: ENC[AES256_GCM,data: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,iv:30EzQJwPsgJqFjihzCacR4D3ifhSwyxRFVwdGGtvcX4=,tag:t0D6jOhyQ5aCxIkRbwqPSQ==,type:str]
+            tls.key: ENC[AES256_GCM,data:iABKU+JUeylGwCkty/hf1LvKlZSLToREmoyHEJVYah24gXJ8DJJVBsbbB3nbRntv6Sq0WYdHbD02Z+T7LD/ORkP5ed4fBjUgefOGopv/5yyD7tXkRs4N7S8PstAOZJWdbbG5BIaAaAkYqkjobw/1ME7dTsGsy4duLl6mtYSeVUm1CRHkjVki0uPwwXFWKdrFcXEKisbITS8BQCZaYOTWlTR/kGbFYYlFVorPJyHBndz4xgy9uACtrWkYCrtMslmW9ZtJq8k6pkbLilI5ZnVNfRuLC8bpNcWYVhcaM717nPqmdZ9oH0DNmitkDy9hafAfBozfb2tVfYKiBgCg5ey6Mu9polb0mdyuAS8VSPOFnL/TzCgl/aaPA4j+o9ZBmCPOfvWmKf3+mmoVH3OttM1BoN8VHcgBSHgE/ieDhJvPI7+24h8zL+TdiRQQCKPGS4exrDs0YS/dvv46eHfcGDReD87YTN7wzPutg6Tu+5Ic0BSujCjuFwgUCeaapziRXJBTzwmXlivBlVAeq3zJTk955PrPuiwFY5gTmYm6lOI9VTUWWb8DYZYo2n3lfeX97/tXO5Mq8tvt6TVWYqUdW17g7ij8Mcc2V5iNl/n6wPuTcqqS+qiVmXpaHlSKy+MMQ7nFHBTflm3siRQaaYlaRKPxnTfI61Fx3UUVoP382BqFWNns/MLXugCdT77EHmem/lybtQ0q2xGY1zEXvAgbk/E0vO9wXA2xYfo2FppiuWLNgGfc0ywLnWAi2WMOccZmrNUe0gAKuJ+Q7KQogG9Kku7z3cQfpuvp859Cl8SKtC8BmR2FDU9ApnUyR5mabY79XjX0p/lO6RttvZK3Tr71JJcfQoVFJcBNeyb2RV9e3aCLeJwVe91FiDvRkmA5esbJRJGuzweG2965ritWRUoaTEjYHL8jtof/zoJTpuVou6PNmo+jKPR0WNK2gTVkhoTee6DtJ42O3grZu1vgaREUOkgAmcXMWCTBrTBIREcUOTbdYRmQyeCJJ689X4WSVRz6q6PzJIcA4jF5eiIFIydxBbagVtXunciYETXrlRkA66K4sgOBcjuCFqaIi3SHIIfBF3aedB1M7T2KRV84ypNNryh/rt8zn0u/zOY9jdakbi/41vm6ZcCsSmiBDAQCUwBpltIaoC6LJxHzaA/QqbNkJgMkz+/3AWgAIVf1Qy9XT8oYABsNrzG2klw5YOj8hLZoaquVes2zF4cI99zaN2Z3Y77jz8lPcDFDFm8fXmnxCd3Eilyl+O6DDhNJVpcjtF7qqzwxpjTKIHNM3FMJvYjJCJPdgPwe8igNaGDciOPLiFaQC9fCS+5M+nheArQx6pbiGLThhw2p5YzCECJxTY1YmBbyjxt+1H4qT2TxMcvcN+awMZ72ltSQ3HJOoia0jGX8WNU4b2AeFJhBZXxoVlxViGW8tfyXOPr5+9t6sBBecXEP1z01mZqHJwc4UCtQ46Zbn+cR5PveVrkG7PtVI+u71cYs0iOUtJbRROPUeFPGkGWUXw9W1/R1RRHgCtaKBPh9A7EzueshO2wEHHUfYBL9Cy4Lb90nzvJ4hO3sgqDlrNVMnCch0dbKtV2FilMHFvcXCHLJyO5yZVH4GfKrUNSg2lmlsUGg+ZgUVfQZ5zFH+Z9PCN43sz7w7uEOPF61VV2dVNoIwPWmmJfuXxofRSLH4isklZRgYrvH0mZt8ksrXFHJjuogqCNLsD6Gp7BSjlvKkRqrMfxY9OOqhGxP2tmQcDd4Ks1x/Im7XNT/DXWJTC/1bcv14d+8y93zQe50jZG6Q4s/YXYeC24V/7mQ5UAOELa4MpD2mOPPeyeofcjPYAvSqOTmnyXveb0WKnmt72EJwbR0mUIe/W20b0EI2cXX9TvGf4781AbSpiDfq4T4PQ2X1TF5i+IufsKwe+a7QBjImuwoi8eppFD73YookthagXFNiKhvlIqAl8Dz9S68BCfqF5PEhYKTC4qfVMQiOWO7sMpyByKZ6Ily3iqlR/eQe3ERugxTxqIF8gBsW0N8EgvvEZeQFMMK0jgz4pIApsFK8HAoq1qpElyJhllwIfWqANuls8LCZMxHHX+OovPA1G2qhGCk9iFwzEyXyykbOVx4aDtCW106c9Cx0HoRSy5JpKFCU911WA9aEGn7jBRYFs9Eg3HAx5Dd01ck1Ik5WazBIUKsh3w3qZxWl2r+doS3pIw5725SEmAAbxMvgV/NSN6cDrG9zFW20KrHpfkh9I9ain5SzsJJIKeXERUWsjPja4zDE2rxOgpzIpF/LaqomFaRXJKiBQucqQOubO/SJbkWKBYQLw/UdoPLt8ZTkP8IKjd5lUakPS1/MQzPd6g3HXEoQ+M/cYKiqWrGg+PElE2R5NlhbVXL8zPwX1g3xCjoNzIJ6Bdzb0BWA2KQtVjIL8BYHaNjiiwVYMp056juHlNL/HE6k0+1Pf2NxRcARDf7JFIW6/Hn0OJqyyaeSb+6Y/EbPOOR+o8eJ/7AiK7XELrN6y32Wg1z9/ScDpQxB4KVK7KuHIfSNGYYeaG0Gjqdc7DGKXUgxvzVvnABbCbRyuLz3Gackdi/ltRJ8EvGiSdnhmQXRxzplEpibxcWAzX1oTdVQhQofsY+4qCcXoK4bkOSxB5ypd35aPVzWF06L2jxeF6G8YG5KLsGCrLxgnbMctZNze8TWMNXS5w7rA/+ff9inn5D/C5qsrqN/XK8UEh2IWzEI5P6v5mByf5XriX9PLabMvFoBW3UvgO4iCsXKsTSgOArEd5AuxVI3EfGLCe1ZbpGDO2fCoIyONAX7EcRUH64tLw64fn/fRpzcTPSrkf4PKeSm8cVZl2mQzgmO2ZCPCS37oqkWRBtN75g8rimP2JSRD+I2rM5axsTSqyfGDVewyBU4CUyRrSpICnRz4ZLPzpse2DOe5ZHSKU4G8UyCFL51Gt0A270Vri+Pk5nTFAVyIIC+XnOy0StJnAxZe/5hYcPhWsf/4gOAZ+ENZ8xWFs/tQKNrHRz107eDYuGUkK+UJe0oDHv7LthF0IOWdg6VXOp2btmjfhyv6j6q5FXqBxKK9KtSg9Sa6Cg74Ihgw95JrmtuctSjz19VHLzrNwJAzop237i5aYs3Eyi3oZyRorZHzMyvY73vm2VtmO21crk8Ix5bbWIl1ag2/V5i4k+eBwqlykZbcmImMHoGiAUWUUZKG8KoKVj/DjgxjEMCwqrDgisOHYqphlkiHFKZFAVCh3A+RaQT/w8DpJMGW4p9sNgjqBTbML0MRp6x76uZtmMboLmmYoWRJ90kpsm98PLaNnwTfN4XeTP8QhtwwkbvO3DP7olvAxNrk30IVC1yJwX5Jtx7fKHt8WX9j6ZlvBJGGDeSTQxBSkONAj2ST8Fehr9xDlvOQFP975rEaB0dODKKoqSJkGF1yGkvcmPRkYkyfD1FLO6pcEYv4qmAKrZRbFrFBye37PFGyhYHY9avs2ssn4kPoYPx7NFxpLsc1px6DCJgRf//ueg+yvJThzI6vY3D/SfnX+QBLit6iKkMpCfrpaYAW8bzvHd9uwMjkgvpEG4O8IoC8ZMyeUpHWoxoZCoi8pifdDyz0zpg/dochR3aHTGi6QZAdQOdMe5+HNRxG0OQkacGE1Ds80Tr/+oCc+H06QaRxejypLPOyWXnhKcR6leu6FAXKcrL7mpL0jsRFxi66m2pNfIROxpPMTpYCYizN1/pqK+9iE/EpCT6ThuU/6NDphk7rP0O/Z5RdPvrUL6XB7iiCesEalnIMg6nkF0hC3m7JP8OnC02fI2dUCVdLj8EX7JGr+gxN9VaNzCqTjMhtGiNEN9p5DaEyFtxAIUqdtTjGJj10OMcjmWbmDQlHqONc3GLdVi4zfJ4b98mvC+mWMh6c/UkQIqSi0U6jel6rsql+kh9YtLnKhFBYDIkKLVvJ74Bz3n0DtjHesU4MD4nqQu2RlTLNsePQS8aHtY2VzSLMAvZiveM5KL14dtsRgpIqmJBkDeL7oz3DupfGC+0oRSgHO/yaJ4YumNgDI2B+PZzDR75HhSPndiB/uvMhy7gvW1FheHban6awP39wF42So5uaCP3T2LS/JnQVzPUH6v+YX6C4hujvbADpKn4H4RbczM5gsExU8Ab8rbJv0JcJn9f9yddRrAneb9Rq0oiT6Jktw6TfvuDfM3ge+j9Jm5FBigjAiAoVFpPKl3nnlvL7ykj9ivJ4qBdN/px4TAlzQgxnpsxlMkI4MV2gM/4dHaHCNVU/jbPk4L8DdhYJn8oHKYbxkg4OWNli9ToL1U+rwdSkq5OTAfj7dTgacmHN5x5/WdClAiGzAv7klgVQ7qiHvlup5o9ioNpXRc0HiMiQ7tLYrobJPOMgLEFxgsXbqGPRODRw==,iv:T4ljMI9gY3x3o5QOYvvdQcPjaScG57tNLjXdD9qaRvA=,tag:JduBMb0ENmE6nYUQg/Ut/A==,type:str]
+sops:
+    age:
+        - recipient: age1pqkt694pps8jf408tmn8gg6692mpvh23nw9jvqsfxayy9fjth9msps9fcu
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBDaFR5R1pBVEFxTzVyb0pq
+            YTlYN3I3MVNPKzVxajIxQU5SVXFyUDczL2xjCkRtNUhtZ1oxdVFUc3lEczdmWGNO
+            Q2tEWnFERngzMWdIVjM4VWUvbDZVR0EKLS0tIERiWEVSblRSRTcybzRKdnoxMzB4
+            M0lHQVdBeE1RMmR5N0tUbHQ2OUg4OFUKDUTMjvlmhntkFF6EI35yKDIMFx90hYAA
+            T/iPnB+mKTs1M8btnJCCFtJll7BU46QvtSnNdztfLMOf1Hp68lhsww==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2025-12-30T05:59:27Z"
+    mac: ENC[AES256_GCM,data:nljENUTBl/Ty+iYpWsoQNoYJc7/ca36v+0d1X1HBybSX08Zg2GrnN/3O1BjVVjTJuNDnL5/8knwHNHJ8RhBuK0KTIXDyshYxBWMMCZo5X1fHMl5S3p6TL0B8YnXD3UAtLjScKtKKdmrZwLjgHBVecYVmL5VrmjKh4tlOYxGpl6o=,iv:w9P4U/vKVIH9mw6uUrS9pECm1/Z7ikvMpGf16eMvQpE=,tag:k4SxnUh4S95yfgbMNq3L8w==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.11.0
+
+>>> helm/infra/static/issuers/k8s/50-clusterIssuers.yaml <<<
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: clusterissuer-lan-smarthome
+spec:
+  ca:
+    secretName: smarthome-root-ca
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: clusterissuer-cloudflare
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: brandonhowlett.unraid@gmail.com
+    privateKeySecretRef:
+      name: cloudflare-clusterissuer-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+>>> helm/infra/static/namespaces/00-cert-manager.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app: cert-manager
+
+>>> helm/infra/static/namespaces/00-traefik.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+  labels:
+    app: traefik
+
+>>> helm/infra/static/namespaces/30-sops-operator.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sops-operator
+  labels:
+    app: sops-operator
+
+>>> helm/infra/static/namespaces/50-cloudflared.yaml <<<
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudflared
+  labels:
+    app: cl oudflared
+
+>>> pki/smarthome-root-ca.crt <<<
+-----BEGIN CERTIFICATE-----
+MIIFWzCCA0OgAwIBAgIUXoebp8MKiCAuKnjg0bVP1HB8Kc0wDQYJKoZIhvcNAQEL
+BQAwPTELMAkGA1UEBhMCVVMxEjAQBgNVBAoMCVNtYXJ0aG9tZTEaMBgGA1UEAwwR
+U21hcnRob21lIFJvb3QgQ0EwHhcNMjUxMjIzMDYwMTI1WhcNMzUxMjIxMDYwMTI1
+WjA9MQswCQYDVQQGEwJVUzESMBAGA1UECgwJU21hcnRob21lMRowGAYDVQQDDBFT
+bWFydGhvbWUgUm9vdCBDQTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIB
+AKvYraE6RcNMMn7g8bwR+yVoZsu7Wl83umDNn8dMZLaoA8s5WEHDiZXU1EnUybd9
+AOjY6WV0yjcFlLKcU5UclBuuJ/0AU2iq5gBJvnOPHCGSPl7odReRgJIkDrTUJk6F
+arYjLvMsWXIGQZ6ql0R3EwViFr8uTXdffYguCrrgddPVBkqEYqAV7tDDd3VWGgeg
+tB28qcDELlqMRk1S0V7WSz19wLVWl+tC/IA4G1v967oW7M0AUAJzygkdb9Xi8EMV
+oQ054qJ8nEK/hXYKnNn9NEGShqTmCrD1wYOLUy7mQvN9BdEBnYcWHkB7Pzcgw279
+QhTsbS6k5lh5bEDwzQbhiSEs2ZpxIWpNfo+2TrpwetCakFClas3v3aCMZNehhRh5
+ftondK8hZC38aZFfiG528cHk4yQdtB1OjC8iJxW+bScjsMeSxeEEb0mnrniHJQZO
+JbjEx0Xbr0AsGaS6yCXeo7HRGlvt3/W2hdCitRVyrkFdCxQimNAgBrPD9dimWfZ0
+dGY/f9MbzwnngOMw0gppfBJLWof5xuXDA6NLip6pAlffdKdmjV8fp4yh5xDs6oa+
+QxNoXBFWoq/2HsXdwUaM9XSqrUPO1NHv5vOeQPAWqeneavtROxGWaVvIompqC79S
+j/MWSk34sJwFRKTPkCVCmsQvxfgZv1RCP+UI1+VgVKSpAgMBAAGjUzBRMB0GA1Ud
+DgQWBBR/4nuwugFYTf9moyTyIM3dZGcf4TAfBgNVHSMEGDAWgBR/4nuwugFYTf9m
+oyTyIM3dZGcf4TAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4ICAQAQ
+bZUsVpXE/37hhj4BrhUVpeFsbEhvTf/J+sKCOnOtFwH0KpoGQ0rBfvYveaz6xnKk
+3h3u3AL7BzSRAvS+Qk+DdCy1zHw91A/K1hLMZIJffCRsCvgGbM2YEIkLNg9SLrvx
+CiWcpZ0ql5Fu300/NJkoufxbx1fceNKf0rwfyucICj4JUs8wQZMuFeicwNI0ynz1
+dvJhkbiVBxy93wsPEo6WMHmx4GNYQknfGSL3vepIrAYJwpC+XwsaaKyhMis8qj1c
+hOYwTNkg/bO3ml118D9G8ScCp5UedcEWo2OW2XcA/viummtQhpfeXwMy47HkbcMb
+k6wUHmER8zGVkdzgno2TCvpk9pVWjPye5+3VePfJCeE32301XaSxOh3uurAQX6su
+ZlC9/z+DniPDBeESusrWU9VLZQK7DGq4p/nrcVMuPXDiGVovOULZN/4NfBllywaa
+nZww7Dd++xGo6sjvODWeA1K8hwOwlDVretYoVLC2AhREP84Jrc0uwvOgXmjfuPtX
+s6jh+3lmjUdRVm5uxvRF96i9ofDTcuuDTfKRWy/c3okqQYoJ3kE5ncng73IPjUy5
+hXQzRurcv3E1kYeK8lKVlj+DpyvCxR17GoZG9yncFssv8mM25ykIKlq5dpNm9p9H
+OUOktBeJ1AzoeDYLc2VcF9Ql4/gVZcoVMdHUUkXqTw==
+-----END CERTIFICATE-----
