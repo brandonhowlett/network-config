@@ -1,6 +1,6 @@
 Install Ohmyzsh
 ```bash
-sudo apt install zsh
+sudo apt install zsh -y
 which zsh
 chsh -s $(which zsh)
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
