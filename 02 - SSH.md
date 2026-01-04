@@ -71,12 +71,6 @@ Created a dedicated SSH configuration override:
 ``` bash
 sudo nano /etc/ssh/sshd_config.d/10-local-network.conf
 ```
-Disable existing cloud configuration:
-
-``` bash
-sudo rm /etc/ssh/sshd_config.d/50-cloud-init.conf
-```
-
 Contents:
 
 ``` conf
@@ -86,6 +80,12 @@ Match Address 10.10.0.0/16
 Match Address 10.50.0.0/16
     PasswordAuthentication no
     PubkeyAuthentication yes
+```
+
+Disable existing cloud configuration:
+
+``` bash
+sudo rm /etc/ssh/sshd_config.d/50-cloud-init.conf
 ```
 
 Reload SSH:
